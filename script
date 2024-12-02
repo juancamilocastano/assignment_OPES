@@ -1,0 +1,78 @@
+using CSV
+using DataFrames
+using YAML
+using Pkg
+Pkg.instantiate()
+Pkg.activate(@__DIR__)
+using HiGHS
+using JuMP
+using Gurobi
+
+
+
+
+#Step 1: input data
+using CSV
+using DataFrames
+using YAML
+
+Spot_price_data = CSV.read(joinpath(@__DIR__, "Market_prices.csv"), DataFrame)
+Electrolyzer_data = CSV.read(joinpath(@__DIR__, "Electrolyzer_data.csv"), DataFrame)
+
+#Number of hours to carry out the simulation
+T=length(Spot_price_data.value)
+
+
+#Step 2: create model & pass data to model
+m = Model(optimizer_with_attributes(Gurobi.Optimizer))
+
+#create sets->Function create sets
+m.ext[:sets]=Dict()
+J=m.ext[:sets][:J]=1:T
+
+#add time series->Function add time series
+m.ext[:time_series]=Dict()
+Electricity_price_data=Dict() #euros/MWh
+for i in 1:T
+    #Electricity price is assumed as 2 times the spot price in euros/MWh
+Electricity_price_data[i]= Spot_price_data.value[i]*2/1000
+end
+m.ext[:time_series][:Electricity_price_data]=Electricity_price_data
+
+
+
+#Create parameters-> Function process parameters
+m.ext[:parameters] = Dict()
+m.ext[:parameters][:E_capacity]=Electrolyzer_data.Capacity[1] #Electrolyzer capacity in MW
+m.ext[:parameters][:E_efficiency]=Electrolyzer_data.efficiency[1] #Electrolyzer efficiency in kwh/kg
+m.ext[:parameters][:H_cost]=Electrolyzer_data.cost[1] #Hydrogen cost in €/kg
+m.ext[:parameters][:E_min_power]=Electrolyzer_data.standby_consumption[1] #Minimum power consumption of the electrolyzer in percentage
+
+#step 3: Building model
+m.ext[:variables] = Dict()
+m.ext[:expressions] = Dict()
+m.ext[:constraints] = Dict()
+
+#Extract sets
+J=m.ext[:sets][:J]
+
+#Extract time series data   
+E_costs=m.ext[:time_series][:Electricity_price_data]
+
+#Extract parameters
+E_capacity=m.ext[:parameters][:E_capacity]
+E_efficiency=m.ext[:parameters][:E_efficiency]
+H_cost=m.ext[:parameters][:H_cost]
+
+
+#Create variables
+r = m.ext[:variables][:r]=@variable(m, [j=J], lower_bound=0.1, upper_bound=1, base_name="load_factor")
+z = m.ext[:variables][:z]=@variable(m, [j=J], binary=true, base_name="production_0")
+y = m.ext[:variables][:y]=@variable(m, [j=J], binary=true, base_name="production_1")
+
+#Create affine expressions
+r_related_expression = m.ext[:expressions][:r_related_expression]=@expression(m, [j=J], (1000*H_cost/E_efficiency-E_costs[j])*E_capacity*r[j])
+
+
+
+#terminar de escribir las expresiones de la funcion objetivo
