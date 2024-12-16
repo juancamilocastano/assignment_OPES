@@ -25,6 +25,8 @@ T=length(Spot_price_data.value)
 
 #Step 2: create model & pass data to model
 m = Model(optimizer_with_attributes(Gurobi.Optimizer))
+set_optimizer_attribute(m, "IterationLimit", 20000)
+set_optimizer_attribute(m, "MIPGap", 0.001)
 
 #create sets->Function create sets
 m.ext[:sets]=Dict()
@@ -34,8 +36,8 @@ J=m.ext[:sets][:J]=1:T
 m.ext[:time_series]=Dict()
 Electricity_price_data=Dict() #euros/MWh
 for i in 1:T
-    #Electricity price is assumed as 2 times the spot price in euros/MWh
-Electricity_price_data[i]= Spot_price_data.value[i]*2/1000
+    #Electricity price is assumed as 1.5 times the spot price in euros/MWh, otherwise, it would never be feasible to produce hydrogen
+Electricity_price_data[i]= Spot_price_data.value[i]*1.5
 end
 m.ext[:time_series][:Electricity_price_data]=Electricity_price_data
 
@@ -46,6 +48,8 @@ m.ext[:parameters] = Dict()
 m.ext[:parameters][:E_capacity]=Electrolyzer_data.Capacity[1] #Electrolyzer capacity in MW
 m.ext[:parameters][:E_efficiency]=Electrolyzer_data.efficiency[1] #Electrolyzer efficiency in kwh/kg
 m.ext[:parameters][:H_cost]=Electrolyzer_data.cost[1] #Hydrogen cost in €/kg
+m.ext[:parameters][:stack_replacement_cost]=Electrolyzer_data.stack_replacement_cost[1] #Stack replacement cost in €/kW
+m.ext[:parameters][:standby_consumption]=Electrolyzer_data.standby_consumption[1] #Maximum power consumption of the electrolyzer in percentage
 m.ext[:parameters][:E_min_power]=Electrolyzer_data.standby_consumption[1] #Minimum power consumption of the electrolyzer in percentage
 
 #step 3: Building model
@@ -54,25 +58,54 @@ m.ext[:expressions] = Dict()
 m.ext[:constraints] = Dict()
 
 #Extract sets
+#J=m.ext[:sets][:J]
 J=m.ext[:sets][:J]
+
 
 #Extract time series data   
 E_costs=m.ext[:time_series][:Electricity_price_data]
 
 #Extract parameters
-E_capacity=m.ext[:parameters][:E_capacity]
-E_efficiency=m.ext[:parameters][:E_efficiency]
-H_cost=m.ext[:parameters][:H_cost]
+E_capacity=m.ext[:parameters][:E_capacity] #MW
+E_efficiency=m.ext[:parameters][:E_efficiency]/1000 #MWh/kg
+H_cost=m.ext[:parameters][:H_cost] #€/kg
+SRC=m.ext[:parameters][:stack_replacement_cost]*1000/50000 #€/MW, 50000 hours of operation
+SC=m.ext[:parameters][:standby_consumption]*E_capacity/100 #MW
 
 
 #Create variables
-r = m.ext[:variables][:r]=@variable(m, [j=J], lower_bound=0.1, upper_bound=1, base_name="load_factor")
+r = m.ext[:variables][:r]=@variable(m, [j=J], base_name="load_factor")
 z = m.ext[:variables][:z]=@variable(m, [j=J], binary=true, base_name="production_0")
 y = m.ext[:variables][:y]=@variable(m, [j=J], binary=true, base_name="production_1")
 
 #Create affine expressions
-r_related_expression = m.ext[:expressions][:r_related_expression]=@expression(m, [j=J], (1000*H_cost/E_efficiency-E_costs[j])*E_capacity*r[j])
 
+first_term_expression = m.ext[:expressions][:first_term_expression]=@expression(m, [j=J], (H_cost/E_efficiency-E_costs[j])*E_capacity*r[j])
+second_term_expression = m.ext[:expressions][:second_term_expression]=@expression(m, [j=J], -SRC*y[j])
+third_term_expression = m.ext[:expressions][:third_term_expression]=@expression(m, [j=J], -E_costs[j]*z[j]*SC)
+constraint_term_expression = m.ext[:expressions][:constraint_term_expression]=@expression(m, [j=J],H_cost/E_efficiency*E_capacity*r[j])
+
+# Objective function
+obj = m.ext[:objective]=@objective(m, Max, sum(first_term_expression)+sum(second_term_expression)+sum(third_term_expression))
+
+RW=10
+
+##Constraints
+#Remunaration for selling Hydrogen
+con8=m.ext[:constraints][:con8]=@constraint(m, 
+sum(constraint_term_expression) 
+==RW )
+
+con9=m.ext[:constraints][:con9]=@constraint(m, [j=J],
+ r[j] -y[j]<= 1)
+
+con10=m.ext[:constraints][:con10]=@constraint(m, [j=J],
+ -r[j] +0.1*y[j]<= 0)
+
+con11=m.ext[:constraints][:con11]=@constraint(m, [j=J],
+y[j]+z[j]==1)
+
+optimize!(m)
 
 
 #terminar de escribir las expresiones de la funcion objetivo

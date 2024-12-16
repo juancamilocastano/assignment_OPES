@@ -1,2 +1,2 @@
-Capacity,efficiency,cost,standby_consumption
-5,61,7,10
+Capacity,efficiency,cost,standby_consumption,stack_replacement_cost,standby_consumption
+5,61,7,10,380,2
