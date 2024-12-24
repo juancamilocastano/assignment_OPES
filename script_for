@@ -7,104 +7,146 @@ Pkg.activate(@__DIR__)
 using HiGHS
 using JuMP
 using Gurobi
-
+#Define Scenario
+Scenario = 7
 # Step 1: input data
 Spot_price_data = CSV.read(joinpath(@__DIR__, "Market_prices.csv"), DataFrame)
-Electrolyzer_data = CSV.read(joinpath(@__DIR__, "Electrolyzer_data.csv"), DataFrame)
+Scenarios_data=CSV.read(joinpath(@__DIR__, "Electrolyzer_data.csv"), DataFrame)
+Electrolyzer_data = Scenarios_data[Scenario,:]
 
 # Number of hours to carry out the simulation
 T = length(Spot_price_data.value)
 
 
 m = Model(optimizer_with_attributes(Gurobi.Optimizer))
-set_optimizer_attribute(m, "IterationLimit", 1000)
+#set_optimizer_attribute(m, "IterationLimit", 10000)
 set_optimizer_attribute(m, "MIPGap", 0.001)
+set_silent(m)
  # Create sets
  m.ext[:sets] = Dict()
  J = m.ext[:sets][:J] = 1:T
+
+  # Create parameters
+  m.ext[:parameters] = Dict()
+  m.ext[:parameters][:E_capacity] = Electrolyzer_data.Capacity[1] # MW
+  m.ext[:parameters][:E_efficiency] = Electrolyzer_data.efficiency[1] / 1000 # MWh/kg
+  m.ext[:parameters][:H_cost] = Electrolyzer_data.cost[1] # €/kg
+  m.ext[:parameters][:stack_lifespan] = Electrolyzer_data.stack_life_span[1] # hours
+  m.ext[:parameters][:stack_replacement_cost] = Electrolyzer_data.stack_replacement_cost[1] * 1000 / m.ext[:parameters][:stack_lifespan] # €/MW
+  m.ext[:parameters][:standby_consumption] = Electrolyzer_data.standby_consumption[1] * Electrolyzer_data.Capacity[1] / 100 # MW
+  m.ext[:parameters][:Electricity_price] = Electrolyzer_data.Electricity_price[1]/100 # %
+  m.ext[:parameters][:filling_c_p_c] = Electrolyzer_data.filling_c_p_c[1]/1000 # MW/kg
 
  # Add time series
  m.ext[:time_series] = Dict()
  Electricity_price_data = Dict() # euros/MWh
  for i in 1:T
-     Electricity_price_data[i] = Spot_price_data.value[i] * 1.5
+     Electricity_price_data[i] = Spot_price_data.value[i] *1.5*m.ext[:parameters][:Electricity_price]
  end
  m.ext[:time_series][:Electricity_price_data] = Electricity_price_data
 
- # Create parameters
- m.ext[:parameters] = Dict()
- m.ext[:parameters][:E_capacity] = Electrolyzer_data.Capacity[1] # MW
- m.ext[:parameters][:E_efficiency] = Electrolyzer_data.efficiency[1] / 1000 # MWh/kg
- m.ext[:parameters][:H_cost] = Electrolyzer_data.cost[1] # €/kg
- m.ext[:parameters][:stack_replacement_cost] = Electrolyzer_data.stack_replacement_cost[1] * 1000 / 50000 # €/MW
- m.ext[:parameters][:standby_consumption] = Electrolyzer_data.standby_consumption[1] * Electrolyzer_data.Capacity[1] / 100 # MW
+
 
 # Function to create and solve the model
 function solve_model(m::Model, RWF::Any) 
+    
     # Extract sets
     J = m.ext[:sets][:J]
+
     # Extract time series data
     E_costs = m.ext[:time_series][:Electricity_price_data]
+
     #step 3: Building model
     m.ext[:variables] = Dict()
     m.ext[:expressions] = Dict()
     m.ext[:constraints] = Dict()
+
     # Extract parameters
     E_capacity = m.ext[:parameters][:E_capacity] # MW
     E_efficiency = m.ext[:parameters][:E_efficiency] # MWh/kg
     H_cost = m.ext[:parameters][:H_cost] # €/kg
     SRC = m.ext[:parameters][:stack_replacement_cost] # €/MW
     SC = m.ext[:parameters][:standby_consumption] # MW
+    PCF = m.ext[:parameters][:filling_c_p_c] # MW/kg Power consumption filling center per kg
+
     # Create variables
     r = m.ext[:variables][:r] = @variable(m, [j=J], base_name="load_factor")
     z = m.ext[:variables][:z] = @variable(m, [j=J], binary=true, base_name="production_0")
     y = m.ext[:variables][:y] = @variable(m, [j=J], binary=true, base_name="production_1")
+
     # Create affine expressions
-    first_term_expression = m.ext[:expressions][:first_term_expression] = @expression(m, [j=J], (H_cost / E_efficiency - E_costs[j]) * E_capacity * r[j])
+    first_term_expression = m.ext[:expressions][:first_term_expression] = @expression(m, [j=J], (H_cost / E_efficiency - E_costs[j]*(1+PCF/E_efficiency)) * E_capacity * r[j])
     second_term_expression = m.ext[:expressions][:second_term_expression] = @expression(m, [j=J], -SRC * y[j])
     third_term_expression = m.ext[:expressions][:third_term_expression] = @expression(m, [j=J], -E_costs[j] * z[j] * SC)
     constraint_term_expression = m.ext[:expressions][:constraint_term_expression] = @expression(m, [j=J], H_cost / E_efficiency * E_capacity * r[j])
+
     # Objective function
     obj = m.ext[:objective] = @objective(m, Max, sum(first_term_expression) + sum(second_term_expression) + sum(third_term_expression))
+
     # Constraints
-    con8 = m.ext[:constraints][:con8] = @constraint(m, sum(constraint_term_expression) == RWF)
-    con9 = m.ext[:constraints][:con9] = @constraint(m, [j=J], r[j] - y[j] <= 1)
+    con8 = m.ext[:constraints][:con8] = @constraint(m, sum(constraint_term_expression) <= RWF)
+    con9 = m.ext[:constraints][:con9] = @constraint(m, [j=J], r[j] - y[j] <= 0)
     con10 = m.ext[:constraints][:con10] = @constraint(m, [j=J], -r[j] + 0.1 * y[j] <= 0)
     con11 = m.ext[:constraints][:con11] = @constraint(m, [j=J], y[j] + z[j] == 1)
+
     # Solve the model
     optimize!(m)
+
     # Return the objective value
     return objective_value(m)
 end
 
 # Iterate to find the RW value that makes the objective function close to 0
 
+tolerance = 1e-3
+max_iterations = 100
+iteration = 0
+RW=0
 
-RW=1
 results_dict = Dict{String, Vector{Float64}}() 
 results_dict["RW_values"] = [] 
 results_dict["obj_function_value"] = []
-obj_value = solve_model(m,RW)
+solve_model(m,RW)
+obj_value = objective_value(m) 
 
 increment = 100000
 
 while increment >= 1
+
     while obj_value < 0
-        obj_value = solve_model(m,RW)
+        solve_model(m,RW)
+        global obj_value = objective_value(m)
         push!(results_dict["obj_function_value"], obj_value)
         push!(results_dict["RW_values"], RW)
-        RW +=increment # Adjust this step size as needed
         println("RW: $RW, Objective Value: $obj_value")
             if obj_value > 0
             break
         end
+        global RW +=increment # Adjust this step size as needed
     end
-    obj_value = results_dict["obj_function_value"][end-1]
-    RW = results_dict["RW_values"][end-1]
-    increment=10^(floor(log10(increment))-1)
+    global obj_value = results_dict["obj_function_value"][end-1]
+    global RW = results_dict["RW_values"][end-1]
+    global increment=10^(floor(log10(increment))-1)
 end
 
+#print the total number of working hours
+println("Scenario: ", Scenario)
+println("Total number of working hours: ", count(x -> x == 1,value.(m.ext[:variables][:y])))
+println("Total hydrogen production: ", sum(value.( m.ext[:expressions][:constraint_term_expression]))/m.ext[:parameters][:H_cost])
+println("Hydrogen allowed incomes: ", RW)
+println("Hydrogen incomes: ", sum(value.( m.ext[:expressions][:constraint_term_expression])))
+println("objective function value: ", obj_value)
 
 
 
-
+# Assuming your vector is stored in the variable `vec`
+vec = value.(m.ext[:variables][:r])
+# Check if there are values between 0.2 and 0.9
+exists_in_range = any(x -> 0.2 <= x <= 0.9, vec)
+println("Are there values between 0.2 and 0.9? ", exists_in_range)
+vec_array = Array(value.(m.ext[:variables][:r]))
+positions = findall(x -> 0.2 <= x <= 0.9, vec_array)
+println("Positions where values are between 0.2 and 0.9: ", positions)
+# Count the number of elements that are between 0.2 and 0.9
+num_elements = count(x -> 0.2 <= x <= 0.9, vec_array)
+println("Number of elements between 0.2 and 0.9: ", num_elements)
