@@ -8,7 +8,7 @@ using HiGHS
 using JuMP
 using Gurobi
 #Define Scenario
-Scenario = 7
+Scenario = 2
 # Step 1: input data
 Spot_price_data = CSV.read(joinpath(@__DIR__, "Market_prices.csv"), DataFrame)
 Scenarios_data=CSV.read(joinpath(@__DIR__, "Electrolyzer_data.csv"), DataFrame)
@@ -16,12 +16,11 @@ Electrolyzer_data = Scenarios_data[Scenario,:]
 
 # Number of hours to carry out the simulation
 T = length(Spot_price_data.value)
-
-
+#Create model
 m = Model(optimizer_with_attributes(Gurobi.Optimizer))
-#set_optimizer_attribute(m, "IterationLimit", 10000)
 set_optimizer_attribute(m, "MIPGap", 0.001)
 set_silent(m)
+
  # Create sets
  m.ext[:sets] = Dict()
  J = m.ext[:sets][:J] = 1:T
@@ -46,7 +45,6 @@ set_silent(m)
  m.ext[:time_series][:Electricity_price_data] = Electricity_price_data
 
 
-
 # Function to create and solve the model
 function solve_model(m::Model, RWF::Any) 
     
@@ -56,7 +54,7 @@ function solve_model(m::Model, RWF::Any)
     # Extract time series data
     E_costs = m.ext[:time_series][:Electricity_price_data]
 
-    #step 3: Building model
+    # Building model
     m.ext[:variables] = Dict()
     m.ext[:expressions] = Dict()
     m.ext[:constraints] = Dict()
@@ -97,12 +95,9 @@ function solve_model(m::Model, RWF::Any)
 end
 
 # Iterate to find the RW value that makes the objective function close to 0
-
-tolerance = 1e-3
-max_iterations = 100
-iteration = 0
 RW=0
 
+# Create a dictionary to store the results
 results_dict = Dict{String, Vector{Float64}}() 
 results_dict["RW_values"] = [] 
 results_dict["obj_function_value"] = []
@@ -111,6 +106,7 @@ obj_value = objective_value(m)
 
 increment = 100000
 
+# Iterate to find the RW value that makes the objective function close to 0
 while increment >= 1
 
     while obj_value < 0
@@ -122,31 +118,21 @@ while increment >= 1
             if obj_value > 0
             break
         end
-        global RW +=increment # Adjust this step size as needed
+        global RW +=increment 
     end
     global obj_value = results_dict["obj_function_value"][end-1]
     global RW = results_dict["RW_values"][end-1]
     global increment=10^(floor(log10(increment))-1)
 end
 
-#print the total number of working hours
+#print Output values
 println("Scenario: ", Scenario)
-println("Total number of working hours: ", count(x -> x == 1,value.(m.ext[:variables][:y])))
-println("Total hydrogen production: ", sum(value.( m.ext[:expressions][:constraint_term_expression]))/m.ext[:parameters][:H_cost])
-println("Hydrogen allowed incomes: ", RW)
-println("Hydrogen incomes: ", sum(value.( m.ext[:expressions][:constraint_term_expression])))
+println("Total number of working hours per year: ", count(x -> x == 1,value.(m.ext[:variables][:y])))
+println("Total hydrogen production per year: ", sum(value.( m.ext[:expressions][:constraint_term_expression]))/m.ext[:parameters][:H_cost])
+println("Hydrogen allowed incomes per year: ", RW)
+println("Hydrogen incomes per year: ", sum(value.( m.ext[:expressions][:constraint_term_expression])))
 println("objective function value: ", obj_value)
 
 
 
-# Assuming your vector is stored in the variable `vec`
-vec = value.(m.ext[:variables][:r])
-# Check if there are values between 0.2 and 0.9
-exists_in_range = any(x -> 0.2 <= x <= 0.9, vec)
-println("Are there values between 0.2 and 0.9? ", exists_in_range)
-vec_array = Array(value.(m.ext[:variables][:r]))
-positions = findall(x -> 0.2 <= x <= 0.9, vec_array)
-println("Positions where values are between 0.2 and 0.9: ", positions)
-# Count the number of elements that are between 0.2 and 0.9
-num_elements = count(x -> 0.2 <= x <= 0.9, vec_array)
-println("Number of elements between 0.2 and 0.9: ", num_elements)
+
